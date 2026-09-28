@@ -1,0 +1,9 @@
+{
+  "id": "aticle-gitobs",
+  "name": "aticle GitObs",
+  "version": "1.0.0",
+  "minAppVersion": "1.0.0",
+  "description": "一个简单的 Obsidian 示例插件。",
+  "author": "sulan",
+  "isDesktopOnly": false
+}
