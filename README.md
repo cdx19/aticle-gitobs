@@ -2,6 +2,8 @@
 
 一个用于 **Obsidian** 的 Git Markdown 文章同步插件。
 
+**支持git复用，浏览器登录GitHub以后无需再登陆**
+
 ## 功能
 
 ### Git 仓库配置
