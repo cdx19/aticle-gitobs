@@ -51,6 +51,13 @@ class GitArticlesView extends ItemView {
     contentEl: HTMLElement;
     private isLoading = false;
 
+    // 新增：搜索关键词
+    private searchQuery = "";
+    // 新增：本地区是否折叠
+    private localSectionCollapsed = false;
+    // 新增：远程分组折叠状态
+    private collapsedRemoteGroups = new Set<string>();
+
     constructor(leaf: WorkspaceLeaf, plugin: MySimplePlugin) {
         super(leaf);
         this.plugin = plugin;
@@ -89,7 +96,22 @@ class GitArticlesView extends ItemView {
             cls: "git-articles-subtitle",
         });
 
-        const refreshButton = header.createEl("button", {
+        const actions = header.createDiv({ cls: "git-articles-header-actions" });
+
+        // 新增：搜索框
+        const searchWrap = actions.createDiv({ cls: "git-articles-search" });
+        const searchInput = searchWrap.createEl("input", {
+            type: "search",
+            placeholder: "搜索标题或路径…",
+            cls: "git-articles-search-input",
+        });
+        searchInput.value = this.searchQuery;
+        searchInput.oninput = () => {
+            this.searchQuery = searchInput.value.trim().toLowerCase();
+            this.applyFilter();
+        };
+
+        const refreshButton = actions.createEl("button", {
             text: "刷新",
             cls: "git-articles-refresh",
         });
@@ -143,8 +165,7 @@ class GitArticlesView extends ItemView {
             await this.loadArticles();
         } catch (error) {
             new Notice(
-                `刷新失败：${
-                    error instanceof Error ? error.message : String(error)
+                `刷新失败：${error instanceof Error ? error.message : String(error)
                 }`
             );
         } finally {
@@ -165,7 +186,6 @@ class GitArticlesView extends ItemView {
                 if (!this.localTitles.has(file.name)) {
                     this.localTitles.set(file.name, file);
                 }
-                // 每处理一批让出事件循环，避免长时间阻塞 UI
                 if (i % 200 === 0) {
                     await new Promise((r) => setTimeout(r, 0));
                 }
@@ -189,13 +209,184 @@ class GitArticlesView extends ItemView {
             const summary = list.createDiv({ cls: "git-articles-summary" });
             summary.setText(`共 ${this.articles.length} 篇文章`);
 
+            // 新增：远程文章分组容器
+            const remoteGroups = list.createDiv({ cls: "git-articles-groups" });
+
+            // 按文件夹分组
+            const groupMap = new Map<string, RemoteArticle[]>();
             for (const article of this.articles) {
-                this.renderArticleCard(list, article);
+                const dir = article.relativePath.includes("/")
+                    ? article.relativePath.slice(0, article.relativePath.lastIndexOf("/"))
+                    : "根目录";
+                if (!groupMap.has(dir)) {
+                    groupMap.set(dir, []);
+                }
+                groupMap.get(dir)!.push(article);
+            }
+
+            const sortedGroups = Array.from(groupMap.entries()).sort((a, b) =>
+                a[0].localeCompare(b[0], "zh-CN")
+            );
+
+            for (const [dir, items] of sortedGroups) {
+                this.renderRemoteGroup(remoteGroups, dir, items);
             }
 
             await this.renderLocalArticles();
+
+            // 新增：应用当前搜索
+            this.applyFilter();
         } finally {
             await this.plugin.removeTempDir(tempDir);
+        }
+    }
+
+    applyFilter() {
+        const query = this.searchQuery;
+
+        // 远程分组
+        const groups = this.contentEl.querySelectorAll(".git-remote-group");
+        groups.forEach((groupEl) => {
+            const el = groupEl as HTMLElement;
+            const cards = el.querySelectorAll(".git-article-card");
+            let visibleCount = 0;
+
+            cards.forEach((cardEl) => {
+                const card = cardEl as HTMLElement;
+                const text = card.dataset.search ?? "";
+                const match = !query || text.includes(query);
+                card.style.display = match ? "" : "none";
+                if (match) visibleCount++;
+            });
+
+            // 分组标题也要能匹配
+            const groupName = el
+                .querySelector(".git-remote-group-name")
+                ?.textContent?.toLowerCase() ?? "";
+            const groupMatch = !query || groupName.includes(query);
+
+            el.style.display = visibleCount > 0 || groupMatch ? "" : "none";
+
+            // 如果搜索命中分组名，展开该分组
+            const body = el.querySelector(".git-remote-group-body") as HTMLElement;
+            const toggle = el.querySelector(".git-remote-group-toggle");
+            if (body && toggle) {
+                if (query && groupMatch && visibleCount > 0) {
+                    body.style.display = "";
+                    toggle.textContent = "▼";
+                } else {
+                    const dir = el
+                        .querySelector(".git-remote-group-name")
+                        ?.textContent ?? "";
+                    const collapsed = this.collapsedRemoteGroups.has(dir);
+                    body.style.display = collapsed ? "none" : "";
+                    toggle.textContent = collapsed ? "▶" : "▼";
+                }
+            }
+        });
+
+        // 本地文章
+        const localSection = this.contentEl.querySelector(
+            ".git-local-articles-section"
+        ) as HTMLElement | null;
+
+        if (localSection) {
+            const localCards = localSection.querySelectorAll(".git-local-article-card");
+            let visibleLocal = 0;
+
+            localCards.forEach((cardEl) => {
+                const card = cardEl as HTMLElement;
+                const text = card.dataset.search ?? "";
+                const match = !query || text.includes(query);
+                card.style.display = match ? "" : "none";
+                if (match) visibleLocal++;
+            });
+
+            // 本地列表容器
+            const localList = localSection.querySelector(
+                ".git-local-articles-list"
+            ) as HTMLElement | null;
+
+            if (localList) {
+                if (query) {
+                    localList.style.display = visibleLocal > 0 ? "" : "none";
+                } else {
+                    localList.style.display = this.localSectionCollapsed ? "none" : "";
+                }
+            }
+
+            // 本地整个区域：搜索时如果没结果，可以隐藏
+            if (query && visibleLocal === 0) {
+                localSection.style.display = "none";
+            } else {
+                localSection.style.display = "";
+            }
+        }
+
+        // 搜索无结果提示
+        let noResult = this.contentEl.querySelector(".git-articles-no-result");
+        const remoteVisible = Array.from(
+            this.contentEl.querySelectorAll(".git-remote-group")
+        ).some((el) => (el as HTMLElement).style.display !== "none");
+
+        const localVisible =
+            localSection &&
+            localSection.style.display !== "none" &&
+            Array.from(
+                localSection.querySelectorAll(".git-local-article-card")
+            ).some((el) => (el as HTMLElement).style.display !== "none");
+
+        if (query && !remoteVisible && !localVisible) {
+            if (!noResult) {
+                noResult = this.contentEl.createDiv({
+                    cls: "git-articles-no-result",
+                    text: `没有找到包含“${this.searchQuery}”的文章`,
+                });
+            }
+        } else {
+            noResult?.remove();
+        }
+    }
+
+    renderRemoteGroup(container: HTMLElement, dir: string, articles: RemoteArticle[]) {
+        const group = container.createDiv({ cls: "git-remote-group" });
+
+        const collapsed = this.collapsedRemoteGroups.has(dir);
+
+        const header = group.createDiv({ cls: "git-remote-group-header" });
+        const left = header.createDiv({ cls: "git-remote-group-title" });
+
+        const toggle = left.createEl("span", {
+            text: collapsed ? "▶" : "▼",
+            cls: "git-remote-group-toggle",
+        });
+
+        left.createEl("span", {
+            text: dir,
+            cls: "git-remote-group-name",
+        });
+
+        left.createEl("span", {
+            text: `(${articles.length})`,
+            cls: "git-remote-group-count",
+        });
+
+        header.onclick = () => {
+            if (this.collapsedRemoteGroups.has(dir)) {
+                this.collapsedRemoteGroups.delete(dir);
+            } else {
+                this.collapsedRemoteGroups.add(dir);
+            }
+            this.applyFilter();
+        };
+
+        const body = group.createDiv({ cls: "git-remote-group-body" });
+        if (collapsed) {
+            body.style.display = "none";
+        }
+
+        for (const article of articles) {
+            this.renderArticleCard(body, article);
         }
     }
 
@@ -204,11 +395,25 @@ class GitArticlesView extends ItemView {
         const localFile = this.localTitles.get(remoteFileName);
         const card = list.createDiv({ cls: "git-article-card" });
 
+        // 搜索用
+        card.dataset.search = `${article.title} ${article.relativePath}`.toLowerCase();
+
         const info = card.createDiv({ cls: "git-article-info" });
-        info.createEl("div", {
+
+        const titleRow = info.createDiv({ cls: "git-article-title-row" });
+        titleRow.createEl("div", {
             text: article.title,
             cls: "git-article-title",
         });
+
+        // 新增：状态标签
+        const badge = titleRow.createEl("span", {
+            text: localFile ? "已同步" : "未下载",
+            cls: localFile
+                ? "git-article-badge is-synced"
+                : "git-article-badge is-remote",
+        });
+
         info.createEl("div", {
             text: article.relativePath,
             cls: "git-article-path",
@@ -265,8 +470,7 @@ class GitArticlesView extends ItemView {
                 }
             } catch (error) {
                 new Notice(
-                    `${localFile ? "同步" : "下载"}失败：${
-                        error instanceof Error ? error.message : String(error)
+                    `${localFile ? "同步" : "下载"}失败：${error instanceof Error ? error.message : String(error)
                     }`
                 );
             } finally {
@@ -285,12 +489,23 @@ class GitArticlesView extends ItemView {
         const section = this.contentEl.createDiv({ cls: "git-local-articles-section" });
 
         const header = section.createDiv({ cls: "git-local-articles-header" });
-        const titleBox = header.createDiv();
+
+        const titleBox = header.createDiv({ cls: "git-local-articles-title" });
         titleBox.createEl("h3", { text: "本地文章上传" });
         titleBox.createEl("div", {
             text: "读取当前 Vault 中的 Markdown 文件，选择 Git 仓库文件夹后上传。",
             cls: "git-articles-subtitle",
         });
+
+        // 新增：折叠按钮
+        const collapseBtn = header.createEl("button", {
+            text: this.localSectionCollapsed ? "展开" : "收起",
+            cls: "git-local-collapse-btn",
+        });
+        collapseBtn.onclick = () => {
+            this.localSectionCollapsed = !this.localSectionCollapsed;
+            this.applyFilter();
+        };
 
         const localFiles = this.app.vault
             .getMarkdownFiles()
@@ -306,8 +521,13 @@ class GitArticlesView extends ItemView {
 
         const list = section.createDiv({ cls: "git-local-articles-list" });
 
+        if (this.localSectionCollapsed) {
+            list.style.display = "none";
+        }
+
         for (const file of localFiles) {
             const card = list.createDiv({ cls: "git-local-article-card" });
+            card.dataset.search = `${file.basename} ${file.path}`.toLowerCase();
 
             const info = card.createDiv({ cls: "git-article-info" });
             info.createEl("div", {

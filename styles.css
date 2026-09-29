@@ -440,3 +440,189 @@
     background: var(--background-modifier-hover);
     color: var(--text-normal);
 }
+
+/* ========== 搜索框 ========== */
+
+.git-articles-header-actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex: 0 0 auto;
+}
+
+.git-articles-search {
+    position: relative;
+}
+
+.git-articles-search-input {
+    width: 220px;
+    padding: 7px 12px;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 8px;
+    background: var(--background-secondary);
+    color: var(--text-normal);
+    font-size: 0.85em;
+    box-sizing: border-box;
+}
+
+.git-articles-search-input:focus {
+    outline: none;
+    border-color: var(--interactive-accent);
+}
+
+/* ========== 远程分组 ========== */
+
+.git-articles-groups {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+}
+
+.git-remote-group {
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 12px;
+    background: var(--background-primary);
+    overflow: hidden;
+}
+
+.git-remote-group-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 14px;
+    background: var(--background-secondary);
+    cursor: pointer;
+    user-select: none;
+}
+
+.git-remote-group-header:hover {
+    background: var(--background-secondary-alt);
+}
+
+.git-remote-group-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+}
+
+.git-remote-group-toggle {
+    color: var(--text-muted);
+    font-size: 0.75em;
+}
+
+.git-remote-group-name {
+    overflow: hidden;
+    color: var(--text-normal);
+    font-size: 0.9em;
+    font-weight: 600;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.git-remote-group-count {
+    color: var(--text-faint);
+    font-size: 0.78em;
+}
+
+.git-remote-group-body {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 12px;
+}
+
+/* 分组内卡片去掉多余外边距 */
+.git-remote-group-body .git-article-card {
+    margin-bottom: 0;
+}
+
+/* ========== 状态标签 ========== */
+
+.git-article-title-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+}
+
+.git-article-title-row .git-article-title {
+    flex: 0 1 auto;
+    min-width: 0;
+}
+
+.git-article-badge {
+    flex: 0 0 auto;
+    padding: 2px 7px;
+    border-radius: 999px;
+    font-size: 0.68em;
+    font-weight: 600;
+    line-height: 1.6;
+}
+
+.git-article-badge.is-synced {
+    background: var(--background-modifier-success);
+    color: var(--text-on-accent);
+}
+
+.git-article-badge.is-remote {
+    background: var(--background-modifier-border);
+    color: var(--text-muted);
+}
+
+/* ========== 本地区折叠 ========== */
+
+.git-local-articles-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.git-local-collapse-btn {
+    flex: 0 0 auto;
+    padding: 6px 12px;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 7px;
+    background: var(--background-secondary);
+    color: var(--text-normal);
+    font-size: 0.82em;
+    cursor: pointer;
+}
+
+.git-local-collapse-btn:hover {
+    background: var(--background-modifier-hover);
+}
+
+/* ========== 搜索无结果 ========== */
+
+.git-articles-no-result {
+    max-width: 920px;
+    margin: 40px auto;
+    padding: 28px;
+    border: 1px dashed var(--background-modifier-border);
+    border-radius: 12px;
+    color: var(--text-muted);
+    text-align: center;
+}
+
+/* ========== 小屏适配补充 ========== */
+
+@media (max-width: 600px) {
+    .git-articles-header {
+        flex-direction: column;
+        align-items: stretch;
+    }
+
+    .git-articles-header-actions {
+        width: 100%;
+    }
+
+    .git-articles-search {
+        flex: 1 1 auto;
+    }
+
+    .git-articles-search-input {
+        width: 100%;
+    }
+}
