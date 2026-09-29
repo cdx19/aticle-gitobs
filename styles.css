@@ -133,6 +133,7 @@
     opacity: 0.65;
 }
 
+/* 报错题型以及没配置仓库提醒 */
 .git-articles-loading,
 .git-articles-empty,
 .git-articles-error {

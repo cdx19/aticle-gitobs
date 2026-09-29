@@ -238,8 +238,11 @@ class GitArticlesView extends ItemView {
     }
 
     async renderLocalArticles() {
-        // 刷新时先移除旧的本地文章上传区域，避免重复渲染。
+        // 刷新时先移除旧的渲染区域，避免重复渲染。
         this.contentEl.querySelector(".git-local-articles-section")?.remove();
+        this.contentEl.querySelector(".git-articles-loading")?.remove();
+        this.contentEl.querySelector(".git-articles-empty")?.remove();
+        this.contentEl.querySelector(".git-articles-error")?.remove();
 
         const section = this.contentEl.createDiv({ cls: "git-local-articles-section" });
 
