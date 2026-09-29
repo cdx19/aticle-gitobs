@@ -33,12 +33,15 @@ interface GitSyncSettings {
     repoUrl: string;
     sshKey: string;
     targetFolder: string;
+    /** 自动刷新间隔（毫秒），0 表示关闭 */
+    autoRefreshInterval: number;
 }
 
 const DEFAULT_SETTINGS: GitSyncSettings = {
     repoUrl: "",
     sshKey: "",
     targetFolder: "Git文章",
+    autoRefreshInterval: 0,
 };
 
 class GitArticlesView extends ItemView {
@@ -401,12 +404,34 @@ class GitSyncSettingTab extends PluginSettingTab {
                     await this.plugin.activateArticlesView();
                 })
             );
+
+        new Setting(containerEl)
+            .setName("自动刷新间隔（毫秒）")
+            .setDesc(
+                "按设定间隔自动拉取 Git 仓库信息与本地文章信息并刷新列表。设为 0 表示关闭自动刷新。建议不小于 5000 毫秒。"
+            )
+            .addText((text) => {
+                text
+                    .setPlaceholder("0")
+                    .setValue(String(this.plugin.settings.autoRefreshInterval ?? 0))
+                    .onChange(async (value) => {
+                        const num = Number(value.trim());
+                        this.plugin.settings.autoRefreshInterval =
+                            Number.isFinite(num) && num > 0 ? Math.floor(num) : 0;
+                        await this.plugin.saveSettings();
+                        this.plugin.restartAutoRefresh();
+                    });
+                text.inputEl.type = "number";
+                text.inputEl.min = "0";
+                text.inputEl.step = "1000";
+            });
     }
 }
 
 export default class MySimplePlugin extends Plugin {
     settings: GitSyncSettings;
     private settingsReady: Promise<void> | null = null;
+    private autoRefreshTimer: number | null = null;
 
     /** 供 refresh.ts 使用，避免循环依赖 */
     readonly viewTypeArticles = VIEW_TYPE_ARTICLES;
@@ -432,7 +457,10 @@ export default class MySimplePlugin extends Plugin {
 
         // 异步加载设置，不阻塞插件加载
         this.ensureSettingsLoaded()
-            .then(() => console.log("Git 文章同步插件已加载"))
+            .then(() => {
+                this.restartAutoRefresh();
+                console.log("Git 文章同步插件已加载");
+            })
             .catch((err) => console.error("加载 Git 文章同步设置失败：", err));
     }
 
@@ -465,6 +493,34 @@ export default class MySimplePlugin extends Plugin {
         }
 
         workspace.revealLeaf(leaf);
+    }
+
+    /** 根据当前设置重建自动刷新定时器 */
+    async restartAutoRefresh() {
+        this.stopAutoRefresh();
+
+        const interval = this.settings?.autoRefreshInterval ?? 0;
+        if (!interval || interval <= 0) {
+            return;
+        }
+
+        this.autoRefreshTimer = window.setInterval(() => {
+            // 没配置仓库就跳过
+            if (!this.settings?.repoUrl) return;
+            refreshArticlesView(this, { silent: true }).catch((err) =>
+                console.warn("自动刷新文章列表失败：", err)
+            );
+        }, interval);
+
+        // 注册到插件生命周期，卸载时自动清理
+        this.registerInterval(this.autoRefreshTimer);
+    }
+
+    async stopAutoRefresh() {
+        if (this.autoRefreshTimer !== null) {
+            window.clearInterval(this.autoRefreshTimer);
+            this.autoRefreshTimer = null;
+        }
     }
 
     async cloneToTemp(): Promise<string> {
@@ -630,6 +686,7 @@ export default class MySimplePlugin extends Plugin {
     }
 
     onunload() {
+        this.stopAutoRefresh();
         this.app.workspace.detachLeavesOfType(VIEW_TYPE_ARTICLES);
     }
 }
