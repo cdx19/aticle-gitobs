@@ -3,7 +3,8 @@ import { simpleGit } from "simple-git";
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
-import type MySimplePlugin from "./main";
+import type MySimplePlugin from "../main";
+import { refreshArticlesView } from "./refresh";
 
 export class UploadArticleModal extends Modal {
     plugin: MySimplePlugin;
@@ -126,11 +127,16 @@ export class UploadArticleModal extends Modal {
 
             try {
                 await uploadLocalArticle(this.plugin, this.file, folder);
-                new Notice(`《${this.file.basename}》已上传到 ${folder || "仓库根目录"}`);
+                new Notice(
+                    `《${this.file.basename}》已上传到 ${folder || "仓库根目录"}`
+                );
+                await refreshArticlesView(this.plugin, { silent: true });
                 this.close();
             } catch (error) {
                 new Notice(
-                    `上传失败：${error instanceof Error ? error.message : String(error)}`
+                    `上传失败：${
+                        error instanceof Error ? error.message : String(error)
+                    }`
                 );
             } finally {
                 this.uploadButton.disabled = false;
@@ -161,7 +167,9 @@ export async function uploadLocalArticle(
 
         // 防止通过文件夹输入跳出 Git 临时仓库。
         const folderParts = cleanFolder
-            ? cleanFolder.split("/").filter((part) => part && part !== "." && part !== "..")
+            ? cleanFolder
+                  .split("/")
+                  .filter((part) => part && part !== "." && part !== "..")
             : [];
 
         cleanFolder = folderParts.join("/");

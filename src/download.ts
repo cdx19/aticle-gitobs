@@ -1,7 +1,7 @@
 import { FileSystemAdapter, TFile } from "obsidian";
 import * as fs from "fs";
 import * as path from "path";
-import type MySimplePlugin from "./main";
+import type MySimplePlugin from "../main";
 import type { RemoteArticle } from "./sync";
 
 export async function downloadArticle(

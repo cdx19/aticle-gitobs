@@ -11,6 +11,7 @@ import {
 } from "obsidian";
 import { simpleGit } from "simple-git";
 import * as fs from "fs";
+import * as fsp from "fs/promises";
 import * as path from "path";
 import * as os from "os";
 
@@ -22,6 +23,7 @@ import {
 } from "./src/sync";
 import { downloadArticle } from "./src/download";
 import { UploadArticleModal, uploadLocalArticle } from "./src/upload";
+import { refreshArticlesView } from "./src/refresh";
 
 export type { RemoteArticle };
 
@@ -44,6 +46,7 @@ class GitArticlesView extends ItemView {
     articles: RemoteArticle[] = [];
     localTitles = new Map<string, TFile>();
     contentEl: HTMLElement;
+    private isLoading = false;
 
     constructor(leaf: WorkspaceLeaf, plugin: MySimplePlugin) {
         super(leaf);
@@ -68,6 +71,8 @@ class GitArticlesView extends ItemView {
     }
 
     async render() {
+        await this.plugin.ensureSettingsLoaded();
+
         this.contentEl.empty();
         this.contentEl.addClass("git-articles-container");
 
@@ -122,16 +127,44 @@ class GitArticlesView extends ItemView {
         }
     }
 
+    /** 对外公开的刷新入口，供 refresh.ts 调用 */
+    async refresh() {
+        if (!this.plugin.settings.repoUrl) {
+            return;
+        }
+
+        if (this.isLoading) return;
+        this.isLoading = true;
+
+        try {
+            await this.loadArticles();
+        } catch (error) {
+            new Notice(
+                `刷新失败：${
+                    error instanceof Error ? error.message : String(error)
+                }`
+            );
+        } finally {
+            this.isLoading = false;
+        }
+    }
+
     async loadArticles() {
         const tempDir = await this.plugin.cloneToTemp();
         try {
-            this.articles = this.plugin.getRemoteArticles(tempDir);
-            this.localTitles.clear();
+            this.articles = await this.plugin.getRemoteArticles(tempDir);
 
-            for (const file of this.app.vault.getMarkdownFiles()) {
-                // 用完整文件名（含 .md）作为 key，避免 path.extname 截断问题
+            this.localTitles.clear();
+            const localFiles = this.app.vault.getMarkdownFiles();
+
+            for (let i = 0; i < localFiles.length; i++) {
+                const file = localFiles[i];
                 if (!this.localTitles.has(file.name)) {
                     this.localTitles.set(file.name, file);
+                }
+                // 每处理一批让出事件循环，避免长时间阻塞 UI
+                if (i % 200 === 0) {
+                    await new Promise((r) => setTimeout(r, 0));
                 }
             }
 
@@ -159,12 +192,11 @@ class GitArticlesView extends ItemView {
 
             await this.renderLocalArticles();
         } finally {
-            this.plugin.removeTempDir(tempDir);
+            await this.plugin.removeTempDir(tempDir);
         }
     }
 
     renderArticleCard(list: HTMLElement, article: RemoteArticle) {
-        // 用远程文件的「文件名（含 .md）」去匹配本地文件
         const remoteFileName = article.relativePath.split("/").pop() ?? "";
         const localFile = this.localTitles.get(remoteFileName);
         const card = list.createDiv({ cls: "git-article-card" });
@@ -210,6 +242,7 @@ class GitArticlesView extends ItemView {
                     if (result === "overwrite") {
                         await syncArticle(this.plugin, article, localFile);
                         new Notice(`《${article.title}》已覆盖并同步`);
+                        await refreshArticlesView(this.plugin, { silent: true });
                     } else if (result === "copy") {
                         const copyFile = await syncArticleAsCopy(
                             this.plugin,
@@ -217,6 +250,7 @@ class GitArticlesView extends ItemView {
                             localFile
                         );
                         new Notice(`已保存为副件：${copyFile.path}`);
+                        await refreshArticlesView(this.plugin, { silent: true });
                     }
                 } else {
                     const newFile = await downloadArticle(this.plugin, article);
@@ -224,10 +258,12 @@ class GitArticlesView extends ItemView {
                     action.textContent = "同步";
                     action.classList.add("is-synced");
                     new Notice(`《${article.title}》已下载`);
+                    await refreshArticlesView(this.plugin, { silent: true });
                 }
             } catch (error) {
                 new Notice(
-                    `${localFile ? "同步" : "下载"}失败：${error instanceof Error ? error.message : String(error)
+                    `${localFile ? "同步" : "下载"}失败：${
+                        error instanceof Error ? error.message : String(error)
                     }`
                 );
             } finally {
@@ -238,7 +274,6 @@ class GitArticlesView extends ItemView {
     }
 
     async renderLocalArticles() {
-        // 刷新时先移除旧的渲染区域，避免重复渲染。
         this.contentEl.querySelector(".git-local-articles-section")?.remove();
         this.contentEl.querySelector(".git-articles-loading")?.remove();
         this.contentEl.querySelector(".git-articles-empty")?.remove();
@@ -371,10 +406,13 @@ class GitSyncSettingTab extends PluginSettingTab {
 
 export default class MySimplePlugin extends Plugin {
     settings: GitSyncSettings;
+    private settingsReady: Promise<void> | null = null;
+
+    /** 供 refresh.ts 使用，避免循环依赖 */
+    readonly viewTypeArticles = VIEW_TYPE_ARTICLES;
 
     async onload() {
-        await this.loadSettings();
-
+        // 先注册视图 / 命令 / 菜单，保证插件 UI 立即可用
         this.registerView(
             VIEW_TYPE_ARTICLES,
             (leaf) => new GitArticlesView(leaf, this)
@@ -388,13 +426,22 @@ export default class MySimplePlugin extends Plugin {
             callback: () => this.activateArticlesView(),
         });
 
-        this.addRibbonIcon(
-            "book-open",
-            "打开 Git 文章",
-            () => this.activateArticlesView()
+        this.addRibbonIcon("book-open", "打开 Git 文章", () =>
+            this.activateArticlesView()
         );
 
-        console.log("Git 文章同步插件已加载");
+        // 异步加载设置，不阻塞插件加载
+        this.ensureSettingsLoaded()
+            .then(() => console.log("Git 文章同步插件已加载"))
+            .catch((err) => console.error("加载 Git 文章同步设置失败：", err));
+    }
+
+    async ensureSettingsLoaded(): Promise<void> {
+        if (this.settings) return;
+        if (!this.settingsReady) {
+            this.settingsReady = this.loadSettings();
+        }
+        await this.settingsReady;
     }
 
     async loadSettings() {
@@ -421,6 +468,8 @@ export default class MySimplePlugin extends Plugin {
     }
 
     async cloneToTemp(): Promise<string> {
+        await this.ensureSettingsLoaded();
+
         if (!this.settings.repoUrl) {
             throw new Error("请先在设置中填写 Git 仓库地址");
         }
@@ -441,7 +490,7 @@ export default class MySimplePlugin extends Plugin {
                     `obsidian-git-key-${Date.now()}`
                 );
 
-                fs.writeFileSync(
+                await fsp.writeFile(
                     tempKeyPath,
                     this.settings.sshKey.trim() + "\n",
                     { mode: 0o600 }
@@ -461,12 +510,12 @@ export default class MySimplePlugin extends Plugin {
 
             return tempDir;
         } catch (error) {
-            this.removeTempDir(tempDir);
+            await this.removeTempDir(tempDir);
             throw error;
         } finally {
-            if (tempKeyPath && fs.existsSync(tempKeyPath)) {
+            if (tempKeyPath) {
                 try {
-                    fs.unlinkSync(tempKeyPath);
+                    await fsp.unlink(tempKeyPath);
                 } catch {
                     // 忽略临时密钥清理失败
                 }
@@ -474,23 +523,28 @@ export default class MySimplePlugin extends Plugin {
         }
     }
 
-    getRemoteArticles(repoDir: string): RemoteArticle[] {
+    async getRemoteArticles(repoDir: string): Promise<RemoteArticle[]> {
         const articles: RemoteArticle[] = [];
 
-        const walk = (currentDir: string) => {
-            for (const entry of fs.readdirSync(currentDir, {
+        const walk = async (currentDir: string): Promise<void> => {
+            const entries = await fsp.readdir(currentDir, {
                 withFileTypes: true,
-            })) {
+            });
+
+            for (const entry of entries) {
                 if (entry.name === ".git") continue;
 
                 const absolutePath = path.join(currentDir, entry.name);
 
                 if (entry.isDirectory()) {
-                    walk(absolutePath);
+                    await walk(absolutePath);
                     continue;
                 }
 
-                if (!entry.isFile() || path.extname(entry.name).toLowerCase() !== ".md") {
+                if (
+                    !entry.isFile() ||
+                    path.extname(entry.name).toLowerCase() !== ".md"
+                ) {
                     continue;
                 }
 
@@ -499,17 +553,27 @@ export default class MySimplePlugin extends Plugin {
                     .split(path.sep)
                     .join("/");
 
+                const [content, stat] = await Promise.all([
+                    fsp.readFile(absolutePath, "utf8"),
+                    fsp.stat(absolutePath),
+                ]);
+
                 articles.push({
                     title: path.basename(entry.name, path.extname(entry.name)),
                     relativePath,
                     absolutePath,
-                    content: fs.readFileSync(absolutePath, "utf8"),
-                    size: fs.statSync(absolutePath).size,
+                    content,
+                    size: stat.size,
                 });
+
+                // 每处理一批让出事件循环，避免长任务阻塞 UI
+                if (articles.length % 50 === 0) {
+                    await new Promise((r) => setTimeout(r, 0));
+                }
             }
         };
 
-        walk(repoDir);
+        await walk(repoDir);
 
         return articles.sort((a, b) =>
             a.title.localeCompare(b.title, "zh-CN")
@@ -522,8 +586,15 @@ export default class MySimplePlugin extends Plugin {
         try {
             const folders = new Set<string>();
 
-            const walk = (currentDir: string, relativeBase = "") => {
-                for (const entry of fs.readdirSync(currentDir, { withFileTypes: true })) {
+            const walk = async (
+                currentDir: string,
+                relativeBase = ""
+            ): Promise<void> => {
+                const entries = await fsp.readdir(currentDir, {
+                    withFileTypes: true,
+                });
+
+                for (const entry of entries) {
                     if (entry.name === ".git") continue;
 
                     const absolutePath = path.join(currentDir, entry.name);
@@ -533,26 +604,26 @@ export default class MySimplePlugin extends Plugin {
 
                     if (entry.isDirectory()) {
                         folders.add(relativePath.split(path.sep).join("/"));
-                        walk(absolutePath, relativePath);
+                        await walk(absolutePath, relativePath);
                     }
                 }
             };
 
-            walk(tempDir);
+            await walk(tempDir);
 
             return Array.from(folders).sort((a, b) =>
                 a.localeCompare(b, "zh-CN")
             );
         } finally {
-            this.removeTempDir(tempDir);
+            await this.removeTempDir(tempDir);
         }
     }
 
-    removeTempDir(dir: string) {
-        if (!dir || !fs.existsSync(dir)) return;
+    async removeTempDir(dir: string): Promise<void> {
+        if (!dir) return;
 
         try {
-            fs.rmSync(dir, { recursive: true, force: true });
+            await fsp.rm(dir, { recursive: true, force: true });
         } catch (error) {
             console.warn("清理 Git 临时目录失败：", error);
         }

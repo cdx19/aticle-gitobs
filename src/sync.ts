@@ -1,5 +1,5 @@
 import { App, Modal, Notice, TFile } from "obsidian";
-import type MySimplePlugin from "./main";
+import type MySimplePlugin from "../main";
 
 export interface RemoteArticle {
     title: string;
