@@ -1,6 +1,7 @@
 import {
     App,
     FileSystemAdapter,
+    Modal,
     ItemView,
     Notice,
     Plugin,
@@ -29,15 +30,30 @@ export type { RemoteArticle };
 
 const VIEW_TYPE_ARTICLES = "git-articles-view";
 
-interface GitSyncSettings {
+interface GitRepository {
+    id: string;
+    name: string;
     repoUrl: string;
     sshKey: string;
     targetFolder: string;
+}
+
+interface GitSyncSettings {
+    repositories: GitRepository[];
+    selectedRepoIds: string[];
+
+    // 兼容旧版单仓库字段。Git 操作前会切换为当前仓库。
+    repoUrl: string;
+    sshKey: string;
+    targetFolder: string;
+
     /** 自动刷新间隔（毫秒），0 表示关闭 */
     autoRefreshInterval: number;
 }
 
 const DEFAULT_SETTINGS: GitSyncSettings = {
+    repositories: [],
+    selectedRepoIds: [],
     repoUrl: "",
     sshKey: "",
     targetFolder: "Git文章",
@@ -57,6 +73,8 @@ class GitArticlesView extends ItemView {
     private localSectionCollapsed = false;
     // 新增：远程分组折叠状态
     private collapsedRemoteGroups = new Set<string>();
+    private repositoryPickerOpen = false;
+    private activeRepoId: string | null = null;
 
     constructor(leaf: WorkspaceLeaf, plugin: MySimplePlugin) {
         super(leaf);
@@ -90,13 +108,14 @@ class GitArticlesView extends ItemView {
         const titleBox = header.createDiv({ cls: "git-articles-header-title" });
         titleBox.createEl("h2", { text: "Git 文章" });
         titleBox.createEl("div", {
-            text: this.plugin.settings.repoUrl
+            text: this.plugin.settings.repositories.length
                 ? "从已配置的 Git 仓库读取 Markdown 文章"
                 : "请先在设置中配置 Git 仓库",
             cls: "git-articles-subtitle",
         });
 
         const actions = header.createDiv({ cls: "git-articles-header-actions" });
+        this.renderRepositoryPicker(actions);
 
         // 新增：搜索框
         const searchWrap = actions.createDiv({ cls: "git-articles-search" });
@@ -126,13 +145,21 @@ class GitArticlesView extends ItemView {
             }
         };
 
-        if (!this.plugin.settings.repoUrl) {
+        if (this.plugin.settings.repositories.length === 0) {
             const empty = this.contentEl.createDiv({ cls: "git-articles-empty" });
             empty.createDiv({ cls: "git-articles-empty-icon", text: "⚙️" });
             empty.createEl("h3", { text: "还没有配置 Git 仓库" });
             empty.createEl("p", {
-                text: "打开 Obsidian 设置 → Git 文章同步，填写仓库地址后返回此标签页。",
+                text: "打开 Obsidian 设置 → Git 文章同步，添加一个或多个笔记仓库。",
             });
+            return;
+        }
+
+        if (this.plugin.getSelectedRepositories().length === 0) {
+            const empty = this.contentEl.createDiv({ cls: "git-articles-empty" });
+            empty.createDiv({ cls: "git-articles-empty-icon", text: "📚" });
+            empty.createEl("h3", { text: "请选择至少一个笔记仓库" });
+            empty.createEl("p", { text: "点击上方“笔记仓库”选择要显示的仓库。" });
             return;
         }
 
@@ -154,7 +181,10 @@ class GitArticlesView extends ItemView {
 
     /** 对外公开的刷新入口，供 refresh.ts 调用 */
     async refresh() {
-        if (!this.plugin.settings.repoUrl) {
+        if (
+            this.plugin.settings.repositories.length === 0 ||
+            this.plugin.getSelectedRepositories().length === 0
+        ) {
             return;
         }
 
@@ -174,71 +204,94 @@ class GitArticlesView extends ItemView {
     }
 
     async loadArticles() {
-        const tempDir = await this.plugin.cloneToTemp();
-        try {
-            this.articles = await this.plugin.getRemoteArticles(tempDir);
+        const selectedRepos = this.plugin.getSelectedRepositories();
+        const allArticles: Array<RemoteArticle & { repoId: string; repoName: string }> = [];
 
-            this.localTitles.clear();
-            const localFiles = this.app.vault.getMarkdownFiles();
-
-            for (let i = 0; i < localFiles.length; i++) {
-                const file = localFiles[i];
-                if (!this.localTitles.has(file.name)) {
-                    this.localTitles.set(file.name, file);
-                }
-                if (i % 200 === 0) {
-                    await new Promise((r) => setTimeout(r, 0));
-                }
+        for (const repo of selectedRepos) {
+            this.plugin.activateRepository(repo);
+            const tempDir = await this.plugin.cloneToTemp();
+            try {
+                const repoArticles = await this.plugin.getRemoteArticles(tempDir);
+                allArticles.push(
+                    ...repoArticles.map((article) => ({
+                        ...article,
+                        repoId: repo.id,
+                        repoName: repo.name || repo.repoUrl,
+                    }))
+                );
+            } finally {
+                await this.plugin.removeTempDir(tempDir);
             }
-
-            const oldList = this.contentEl.querySelector(".git-articles-list");
-            oldList?.remove();
-
-            const loading = this.contentEl.querySelector(".git-articles-loading");
-            loading?.remove();
-
-            const list = this.contentEl.createDiv({ cls: "git-articles-list" });
-
-            if (this.articles.length === 0) {
-                const empty = list.createDiv({ cls: "git-articles-empty" });
-                empty.createEl("h3", { text: "仓库中没有 Markdown 文章" });
-                empty.createEl("p", { text: "当前只显示 .md 文件。" });
-                return;
-            }
-
-            const summary = list.createDiv({ cls: "git-articles-summary" });
-            summary.setText(`共 ${this.articles.length} 篇文章`);
-
-            // 新增：远程文章分组容器
-            const remoteGroups = list.createDiv({ cls: "git-articles-groups" });
-
-            // 按文件夹分组
-            const groupMap = new Map<string, RemoteArticle[]>();
-            for (const article of this.articles) {
-                const dir = article.relativePath.includes("/")
-                    ? article.relativePath.slice(0, article.relativePath.lastIndexOf("/"))
-                    : "根目录";
-                if (!groupMap.has(dir)) {
-                    groupMap.set(dir, []);
-                }
-                groupMap.get(dir)!.push(article);
-            }
-
-            const sortedGroups = Array.from(groupMap.entries()).sort((a, b) =>
-                a[0].localeCompare(b[0], "zh-CN")
-            );
-
-            for (const [dir, items] of sortedGroups) {
-                this.renderRemoteGroup(remoteGroups, dir, items);
-            }
-
-            await this.renderLocalArticles();
-
-            // 新增：应用当前搜索
-            this.applyFilter();
-        } finally {
-            await this.plugin.removeTempDir(tempDir);
         }
+
+        this.articles = allArticles.sort((a, b) => {
+            const repoCompare = a.repoName.localeCompare(b.repoName, "zh-CN");
+            return repoCompare || a.title.localeCompare(b.title, "zh-CN");
+        });
+
+        this.localTitles.clear();
+        const localFiles = this.app.vault.getMarkdownFiles();
+
+        for (let i = 0; i < localFiles.length; i++) {
+            const file = localFiles[i];
+            if (!this.localTitles.has(file.name)) {
+                this.localTitles.set(file.name, file);
+            }
+            if (i % 200 === 0) {
+                await new Promise((r) => setTimeout(r, 0));
+            }
+        }
+
+        const oldList = this.contentEl.querySelector(".git-articles-list");
+        oldList?.remove();
+
+        const loading = this.contentEl.querySelector(".git-articles-loading");
+        loading?.remove();
+
+        const list = this.contentEl.createDiv({ cls: "git-articles-list" });
+
+        if (this.articles.length === 0) {
+            const empty = list.createDiv({ cls: "git-articles-empty" });
+            empty.createEl("h3", { text: "仓库中没有 Markdown 文章" });
+            empty.createEl("p", { text: "当前只显示 .md 文件。" });
+            return;
+        }
+
+        const summary = list.createDiv({ cls: "git-articles-summary" });
+        summary.setText(
+            `已选择 ${selectedRepos.length} 个仓库，共 ${this.articles.length} 篇文章`
+        );
+
+        const remoteGroups = list.createDiv({ cls: "git-articles-groups" });
+        const groupMap = new Map<string, Array<RemoteArticle & { repoId: string; repoName: string }>>();
+
+        for (const article of this.articles as Array<RemoteArticle & { repoId: string; repoName: string }>) {
+            const dir = article.relativePath.includes("/")
+                ? article.relativePath.slice(0, article.relativePath.lastIndexOf("/"))
+                : "根目录";
+            const groupKey = `${article.repoId}::${dir}`;
+            if (!groupMap.has(groupKey)) {
+                groupMap.set(groupKey, []);
+            }
+            groupMap.get(groupKey)!.push(article);
+        }
+
+        const sortedGroups = Array.from(groupMap.entries()).sort((a, b) =>
+            a[1][0].repoName.localeCompare(b[1][0].repoName, "zh-CN") ||
+            a[0].localeCompare(b[0], "zh-CN")
+        );
+
+        for (const [groupKey, items] of sortedGroups) {
+            const dir = groupKey.split("::").slice(1).join("::");
+            this.renderRemoteGroup(
+                remoteGroups,
+                `${items[0].repoName} / ${dir}`,
+                items
+            );
+        }
+
+        await this.renderLocalArticles();
+        this.applyFilter();
     }
 
     applyFilter() {
@@ -348,7 +401,64 @@ class GitArticlesView extends ItemView {
         }
     }
 
-    renderRemoteGroup(container: HTMLElement, dir: string, articles: RemoteArticle[]) {
+    renderRepositoryPicker(container: HTMLElement) {
+        const wrap = container.createDiv({ cls: "git-repo-picker" });
+        const selectedCount = this.plugin.getSelectedRepositories().length;
+        const totalCount = this.plugin.settings.repositories.length;
+
+        const button = wrap.createEl("button", {
+            text: `笔记仓库（${selectedCount}/${totalCount}）`,
+            cls: "git-repo-picker-button",
+        });
+
+        const panel = wrap.createDiv({ cls: "git-repo-picker-panel" });
+        panel.style.display = this.repositoryPickerOpen ? "" : "none";
+
+        const toolbar = panel.createDiv({ cls: "git-repo-picker-toolbar" });
+        const selectAll = toolbar.createEl("button", { text: "全选" });
+        const selectNone = toolbar.createEl("button", { text: "清空" });
+
+        const list = panel.createDiv({ cls: "git-repo-picker-list" });
+        for (const repo of this.plugin.settings.repositories) {
+            const label = list.createEl("label", { cls: "git-repo-picker-item" });
+            const checkbox = label.createEl("input", { type: "checkbox" });
+            checkbox.checked = this.plugin.settings.selectedRepoIds.includes(repo.id);
+            label.createSpan({ text: repo.name || repo.repoUrl || "未命名仓库" });
+
+            checkbox.onchange = async () => {
+                const ids = new Set(this.plugin.settings.selectedRepoIds);
+                if (checkbox.checked) ids.add(repo.id);
+                else ids.delete(repo.id);
+
+                this.plugin.settings.selectedRepoIds = Array.from(ids);
+                await this.plugin.saveSettings();
+                this.repositoryPickerOpen = true;
+                await this.render();
+            };
+        }
+
+        selectAll.onclick = async () => {
+            this.plugin.settings.selectedRepoIds =
+                this.plugin.settings.repositories.map((repo) => repo.id);
+            await this.plugin.saveSettings();
+            this.repositoryPickerOpen = true;
+            await this.render();
+        };
+
+        selectNone.onclick = async () => {
+            this.plugin.settings.selectedRepoIds = [];
+            await this.plugin.saveSettings();
+            this.repositoryPickerOpen = true;
+            await this.render();
+        };
+
+        button.onclick = () => {
+            this.repositoryPickerOpen = !this.repositoryPickerOpen;
+            panel.style.display = this.repositoryPickerOpen ? "" : "none";
+        };
+    }
+
+    renderRemoteGroup(container: HTMLElement, dir: string, articles: Array<RemoteArticle & { repoId: string; repoName: string }>) {
         const group = container.createDiv({ cls: "git-remote-group" });
 
         const collapsed = this.collapsedRemoteGroups.has(dir);
@@ -390,13 +500,17 @@ class GitArticlesView extends ItemView {
         }
     }
 
-    renderArticleCard(list: HTMLElement, article: RemoteArticle) {
+    renderArticleCard(
+        list: HTMLElement,
+        article: RemoteArticle & { repoId: string; repoName: string }
+    ) {
         const remoteFileName = article.relativePath.split("/").pop() ?? "";
         const localFile = this.localTitles.get(remoteFileName);
         const card = list.createDiv({ cls: "git-article-card" });
 
         // 搜索用
-        card.dataset.search = `${article.title} ${article.relativePath}`.toLowerCase();
+        card.dataset.search =
+            `${article.repoName} ${article.title} ${article.relativePath}`.toLowerCase();
 
         const info = card.createDiv({ cls: "git-article-info" });
 
@@ -415,7 +529,7 @@ class GitArticlesView extends ItemView {
         });
 
         info.createEl("div", {
-            text: article.relativePath,
+            text: `${article.repoName} · ${article.relativePath}`,
             cls: "git-article-path",
         });
 
@@ -436,6 +550,8 @@ class GitArticlesView extends ItemView {
             action.textContent = localFile ? "同步中…" : "下载中…";
 
             try {
+                this.plugin.activateRepositoryById(article.repoId);
+
                 if (localFile) {
                     const result = await confirmSyncConflict(
                         this.plugin,
@@ -556,6 +672,57 @@ class GitArticlesView extends ItemView {
     }
 }
 
+class DeleteRepositoryConfirmModal extends Modal {
+    private repoName: string;
+    private onConfirm: () => Promise<void>;
+
+    constructor(app: App, repoName: string, onConfirm: () => Promise<void>) {
+        super(app);
+        this.repoName = repoName;
+        this.onConfirm = onConfirm;
+    }
+
+    onOpen() {
+        const { contentEl } = this;
+        contentEl.empty();
+        contentEl.addClass("git-delete-repo-modal");
+
+        contentEl.createEl("h2", { text: "确认删除笔记仓库" });
+
+        const description = contentEl.createDiv({ cls: "git-delete-repo-description" });
+        description.createEl("div", { text: "确定要删除这个笔记仓库配置吗？" });
+        description.createEl("strong", { text: this.repoName || "未命名仓库" });
+        description.createEl("div", {
+            text: "此操作只会移除插件中的仓库配置，不会删除远程 Git 仓库，也不会删除本地文章。",
+            cls: "git-delete-repo-warning",
+        });
+
+        const footer = contentEl.createDiv({ cls: "git-delete-repo-footer" });
+        const cancelButton = footer.createEl("button", { text: "取消", cls: "git-delete-repo-cancel" });
+        const confirmButton = footer.createEl("button", { text: "确认删除", cls: "git-delete-repo-confirm" });
+
+        cancelButton.onclick = () => this.close();
+        confirmButton.onclick = async () => {
+            confirmButton.disabled = true;
+            cancelButton.disabled = true;
+            confirmButton.textContent = "删除中…";
+            try {
+                await this.onConfirm();
+                this.close();
+            } catch (error) {
+                new Notice(`删除仓库失败：${error instanceof Error ? error.message : String(error)}`);
+                confirmButton.disabled = false;
+                cancelButton.disabled = false;
+                confirmButton.textContent = "确认删除";
+            }
+        };
+    }
+
+    onClose() {
+        this.contentEl.empty();
+    }
+}
+
 class GitSyncSettingTab extends PluginSettingTab {
     plugin: MySimplePlugin;
 
@@ -570,55 +737,141 @@ class GitSyncSettingTab extends PluginSettingTab {
 
         containerEl.createEl("h2", { text: "Git 文章同步" });
         containerEl.createEl("p", {
-            text: "在这里配置 Git 仓库环境，文章列表会在“Git 文章”标签页中显示。",
+            text: "在这里管理多个 Git 笔记仓库。文章页面可以同时选择多个仓库。",
             cls: "setting-item-description",
         });
 
-        new Setting(containerEl)
-            .setName("Git 仓库地址")
-            .setDesc("支持 HTTPS 和 SSH，例如 git@github.com:user/repo.git")
-            .addText((text) =>
-                text
-                    .setPlaceholder("git@github.com:user/repo.git")
-                    .setValue(this.plugin.settings.repoUrl)
-                    .onChange(async (value) => {
-                        this.plugin.settings.repoUrl = value.trim();
-                        await this.plugin.saveSettings();
-                    })
-            );
+        const repositories = this.plugin.settings.repositories;
 
-        new Setting(containerEl)
-            .setName("SSH 私钥")
-            .setDesc("可选。留空时使用系统默认 SSH 配置。私钥只用于当前 Git 操作。")
-            .addTextArea((text) => {
-                text
-                    .setPlaceholder("粘贴 SSH 私钥")
-                    .setValue(this.plugin.settings.sshKey)
-                    .onChange(async (value) => {
-                        this.plugin.settings.sshKey = value;
-                        await this.plugin.saveSettings();
-                    });
-                text.inputEl.rows = 7;
-                text.inputEl.addClass("git-sync-settings-key");
+        if (repositories.length === 0) {
+            containerEl.createDiv({
+                text: "暂无笔记仓库，请点击下面的“添加笔记仓库”。",
+                cls: "git-repo-settings-empty",
             });
+        }
+
+        repositories.forEach((repo, index) => {
+            const card = containerEl.createDiv({ cls: "git-repo-settings-card" });
+
+            const heading = card.createDiv({ cls: "git-repo-settings-heading" });
+            heading.createEl("strong", { text: repo.name || `笔记仓库 ${index + 1}` });
+
+            new Setting(card)
+                .setName("仓库名称")
+                .setDesc("输入完成后，离开编辑框时才会保存名称。")
+                .addText((text) => {
+                    text
+                        .setValue(repo.name)
+                        .setPlaceholder(`笔记仓库 ${index + 1}`)
+                        .onChange((value) => {
+                            // 只更新内存中的值，不在输入过程中保存或重建设置页面。
+                            repo.name = value;
+                        });
+
+                    text.inputEl.addEventListener("blur", async () => {
+                        const newName =
+                            text.inputEl.value.trim() || `笔记仓库 ${index + 1}`;
+
+                        repo.name = newName;
+                        text.inputEl.value = newName;
+
+                        await this.plugin.saveSettings();
+
+                        // 只更新标题，不重新 display()，避免设置页面闪烁或输入状态丢失。
+                        const title = heading.querySelector("strong");
+                        if (title) {
+                            title.textContent = newName;
+                        }
+                    });
+                });
+
+            new Setting(card)
+                .setName("Git 仓库地址")
+                .setDesc("支持 HTTPS 和 SSH，例如 git@github.com:user/repo.git")
+                .addText((text) =>
+                    text
+                        .setPlaceholder("git@github.com:user/repo.git")
+                        .setValue(repo.repoUrl)
+                        .onChange(async (value) => {
+                            repo.repoUrl = value.trim();
+                            await this.plugin.saveSettings();
+                        })
+                );
+
+            new Setting(card)
+                .setName("SSH 私钥")
+                .setDesc("可选。留空时使用系统默认 SSH 配置。")
+                .addTextArea((text) => {
+                    text
+                        .setPlaceholder("粘贴 SSH 私钥")
+                        .setValue(repo.sshKey)
+                        .onChange(async (value) => {
+                            repo.sshKey = value;
+                            await this.plugin.saveSettings();
+                        });
+                    text.inputEl.rows = 6;
+                    text.inputEl.addClass("git-sync-settings-key");
+                });
+
+            new Setting(card)
+                .setName("文章保存目录")
+                .setDesc("下载新文章时使用的 Vault 相对路径，例如 Git文章")
+                .addText((text) =>
+                    text
+                        .setPlaceholder("Git文章")
+                        .setValue(repo.targetFolder)
+                        .onChange(async (value) => {
+                            repo.targetFolder =
+                                value.trim().replace(/^\/+|\/+$/g, "") || "Git文章";
+                            await this.plugin.saveSettings();
+                        })
+                );
+
+            new Setting(card)
+                .addButton((button) =>
+                    button
+                        .setButtonText("删除仓库")
+                        .setWarning()
+                        .onClick(() => {
+                            const modal = new DeleteRepositoryConfirmModal(
+                                this.app,
+                                repo.name || `笔记仓库 ${index + 1}`,
+                                async () => {
+                                    this.plugin.settings.repositories =
+                                        this.plugin.settings.repositories.filter((item) => item.id !== repo.id);
+                                    this.plugin.settings.selectedRepoIds =
+                                        this.plugin.settings.selectedRepoIds.filter((id) => id !== repo.id);
+                                    await this.plugin.saveSettings();
+                                    this.display();
+                                }
+                            );
+                            modal.open();
+                        })
+                );
+        });
 
         new Setting(containerEl)
-            .setName("文章保存目录")
-            .setDesc("下载新文章时使用的 Vault 相对路径，例如 Git文章")
-            .addText((text) =>
-                text
-                    .setPlaceholder("Git文章")
-                    .setValue(this.plugin.settings.targetFolder)
-                    .onChange(async (value) => {
-                        this.plugin.settings.targetFolder =
-                            value.trim().replace(/^\/+|\/+$/g, "") || "Git文章";
-                        await this.plugin.saveSettings();
-                    })
+            .setName("添加笔记仓库")
+            .setDesc("可以添加多个仓库，文章页面再按需选择一个或多个仓库。")
+            .addButton((button) =>
+                button.setButtonText("添加").setCta().onClick(async () => {
+                    const repo: GitRepository = {
+                        id: `repo-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                        name: `笔记仓库 ${this.plugin.settings.repositories.length + 1}`,
+                        repoUrl: "",
+                        sshKey: "",
+                        targetFolder: "Git文章",
+                    };
+                    this.plugin.settings.repositories.push(repo);
+                    this.plugin.settings.selectedRepoIds.push(repo.id);
+                    await this.plugin.saveSettings();
+                    this.display();
+                })
             );
 
         new Setting(containerEl)
             .setName("打开文章列表")
-            .setDesc("打开一个新的 Obsidian 标签页，查看仓库中的文章。")
+            .setDesc("打开一个新的 Obsidian 标签页，选择并查看一个或多个仓库中的文章。")
             .addButton((button) =>
                 button.setButtonText("打开").onClick(async () => {
                     await this.plugin.activateArticlesView();
@@ -628,7 +881,7 @@ class GitSyncSettingTab extends PluginSettingTab {
         new Setting(containerEl)
             .setName("自动刷新间隔（毫秒）")
             .setDesc(
-                "按设定间隔自动拉取 Git 仓库信息与本地文章信息并刷新列表。设为 0 表示关闭自动刷新。建议不小于 5000 毫秒。"
+                "按设定间隔自动拉取已选择 Git 仓库的信息并刷新列表。设为 0 表示关闭自动刷新。建议不小于 5000 毫秒。"
             )
             .addText((text) => {
                 text
@@ -693,7 +946,65 @@ export default class MySimplePlugin extends Plugin {
     }
 
     async loadSettings() {
-        this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+        const data = await this.loadData();
+        this.settings = Object.assign({}, DEFAULT_SETTINGS, data);
+
+        if (!Array.isArray(this.settings.repositories)) {
+            this.settings.repositories = [];
+        }
+
+        // 自动把旧版本的单仓库配置迁移成第一个笔记仓库。
+        if (
+            this.settings.repositories.length === 0 &&
+            typeof data?.repoUrl === "string" &&
+            data.repoUrl.trim()
+        ) {
+            const repo: GitRepository = {
+                id: `repo-${Date.now()}`,
+                name: "默认笔记仓库",
+                repoUrl: data.repoUrl.trim(),
+                sshKey: typeof data.sshKey === "string" ? data.sshKey : "",
+                targetFolder:
+                    typeof data.targetFolder === "string" && data.targetFolder.trim()
+                        ? data.targetFolder
+                        : "Git文章",
+            };
+            this.settings.repositories = [repo];
+            this.settings.selectedRepoIds = [repo.id];
+        }
+
+        const validIds = new Set(this.settings.repositories.map((repo) => repo.id));
+        this.settings.selectedRepoIds = Array.isArray(this.settings.selectedRepoIds)
+            ? this.settings.selectedRepoIds.filter((id) => validIds.has(id))
+            : [];
+
+        if (this.settings.repositories.length > 0 && this.settings.selectedRepoIds.length === 0) {
+            this.settings.selectedRepoIds = this.settings.repositories.map((repo) => repo.id);
+        }
+
+        if (this.settings.repositories.length > 0) {
+            this.activateRepository(this.settings.repositories[0]);
+        }
+    }
+
+    getSelectedRepositories(): GitRepository[] {
+        const selected = new Set(this.settings.selectedRepoIds ?? []);
+        return this.settings.repositories.filter((repo) => selected.has(repo.id));
+    }
+
+    activateRepository(repo: GitRepository) {
+        this.activeRepoId = repo.id;
+        // 兼容现有 src/sync、src/download、src/upload 模块。
+        this.settings.repoUrl = repo.repoUrl;
+        this.settings.sshKey = repo.sshKey;
+        this.settings.targetFolder = repo.targetFolder;
+    }
+
+    activateRepositoryById(repoId: string): GitRepository {
+        const repo = this.settings.repositories.find((item) => item.id === repoId);
+        if (!repo) throw new Error("找不到对应的 Git 笔记仓库");
+        this.activateRepository(repo);
+        return repo;
     }
 
     async saveSettings() {
@@ -726,7 +1037,10 @@ export default class MySimplePlugin extends Plugin {
 
         this.autoRefreshTimer = window.setInterval(() => {
             // 没配置仓库就跳过
-            if (!this.settings?.repoUrl) return;
+            if (
+                !this.settings?.repositories?.length ||
+                !this.getSelectedRepositories().length
+            ) return;
             refreshArticlesView(this, { silent: true }).catch((err) =>
                 console.warn("自动刷新文章列表失败：", err)
             );

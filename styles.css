@@ -626,3 +626,137 @@
         width: 100%;
     }
 }
+
+/* ========== 多笔记仓库 ========== */
+
+.git-repo-picker {
+    position: relative;
+    flex: 0 0 auto;
+}
+
+.git-repo-picker-button {
+    min-width: 150px;
+    padding: 7px 12px;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 8px;
+    background: var(--background-secondary);
+    color: var(--text-normal);
+    cursor: pointer;
+}
+
+.git-repo-picker-button:hover {
+    background: var(--background-modifier-hover);
+}
+
+.git-repo-picker-panel {
+    position: absolute;
+    z-index: 50;
+    top: calc(100% + 8px);
+    right: 0;
+    width: 280px;
+    max-height: 360px;
+    padding: 10px;
+    overflow-y: auto;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 10px;
+    background: var(--background-primary);
+    box-shadow: var(--shadow-s);
+    box-sizing: border-box;
+}
+
+.git-repo-picker-toolbar {
+    display: flex;
+    gap: 8px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.git-repo-picker-toolbar button {
+    flex: 1;
+    padding: 5px 8px;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 6px;
+    background: var(--background-secondary);
+    color: var(--text-normal);
+    cursor: pointer;
+}
+
+.git-repo-picker-list {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin-top: 8px;
+}
+
+.git-repo-picker-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px;
+    border-radius: 6px;
+    color: var(--text-normal);
+    cursor: pointer;
+}
+
+.git-repo-picker-item:hover {
+    background: var(--background-modifier-hover);
+}
+
+.git-repo-picker-item input {
+    flex: 0 0 auto;
+}
+
+.git-repo-settings-empty {
+    margin: 12px 0 18px;
+    padding: 16px;
+    border: 1px dashed var(--background-modifier-border);
+    border-radius: 10px;
+    color: var(--text-muted);
+}
+
+.git-repo-settings-card {
+    margin: 0 0 18px;
+    padding: 8px 14px 14px;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 12px;
+    background: var(--background-secondary);
+}
+
+.git-repo-settings-heading {
+    padding: 8px 4px 2px;
+    color: var(--text-normal);
+    font-size: 1.05em;
+}
+
+.git-repo-settings-card .setting-item {
+    border-top-color: var(--background-modifier-border);
+}
+
+@media (max-width: 600px) {
+    .git-repo-picker-panel {
+        position: fixed;
+        top: auto;
+        right: 14px;
+        left: 14px;
+        width: auto;
+    }
+}
+
+
+/* ========== 删除笔记仓库确认弹窗 ========== */
+.git-delete-repo-modal { min-width: min(460px, 90vw); }
+.git-delete-repo-description { display: flex; flex-direction: column; gap: 8px; color: var(--text-normal); line-height: 1.5; }
+.git-delete-repo-description strong { display: block; padding: 10px 12px; border: 1px solid var(--background-modifier-border); border-radius: 8px; background: var(--background-secondary); color: var(--text-normal); word-break: break-word; }
+.git-delete-repo-warning { margin-top: 4px; color: var(--text-muted); font-size: 0.85em; }
+.git-delete-repo-footer { display: flex; justify-content: flex-end; gap: 10px; margin-top: 24px; }
+.git-delete-repo-cancel, .git-delete-repo-confirm { padding: 8px 15px; border-radius: 8px; cursor: pointer; }
+.git-delete-repo-cancel { border: 1px solid var(--background-modifier-border); background: var(--background-secondary); color: var(--text-normal); }
+.git-delete-repo-cancel:hover { background: var(--background-modifier-hover); }
+.git-delete-repo-confirm { border: 1px solid var(--text-error); background: var(--text-error); color: var(--text-on-accent); }
+.git-delete-repo-confirm:hover { filter: brightness(1.08); }
+.git-delete-repo-cancel:disabled, .git-delete-repo-confirm:disabled { cursor: wait; opacity: 0.65; }
+@media (max-width: 600px) {
+  .git-delete-repo-modal { min-width: 0; width: 100%; }
+  .git-delete-repo-footer { flex-direction: column-reverse; }
+  .git-delete-repo-cancel, .git-delete-repo-confirm { width: 100%; }
+}
